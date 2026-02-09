@@ -14,7 +14,7 @@ A lightweight Python library for querying Grafana Loki logs via REST API.
 
 ## Installation
 
-From PyPI (coming soon):
+From PyPI:
 
 ```bash
 pip install loki-reader-core
@@ -140,12 +140,6 @@ pip install -e .
 ```bash
 source bin/activate
 pytest tests/ -v
-```
-
-### Building and Publishing
-
-```bash
-./build-publish.sh
 ```
 
 ## License
