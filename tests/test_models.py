@@ -1,6 +1,8 @@
 """Tests for data models."""
 
-from loki_reader_core.models import LogEntry, LogStream, QueryResult, QueryStats
+from loki_reader_core.models import (
+    LogEntry, LogStream, MetricSample, MetricSeries, QueryResult, QueryStats
+)
 
 
 class TestLogEntry:
@@ -98,6 +100,122 @@ class TestLogStream:
         restored = LogStream.from_dict(original.to_dict())
         assert restored.labels == original.labels
         assert len(restored.entries) == len(original.entries)
+
+
+class TestMetricSample:
+    """Test MetricSample model."""
+
+    def test_create_sample(self) -> None:
+        sample = MetricSample(timestamp=1704067200000000000, value=42.5)
+        assert sample.timestamp == 1704067200000000000
+        assert sample.value == 42.5
+
+    def test_to_dict(self) -> None:
+        sample = MetricSample(timestamp=1704067200000000000, value=42.5)
+        result = sample.to_dict()
+        assert result == {
+            "timestamp": 1704067200000000000,
+            "value": 42.5
+        }
+
+    def test_from_dict(self) -> None:
+        data = {"timestamp": 1704067200000000000, "value": 42.5}
+        sample = MetricSample.from_dict(data)
+        assert sample.timestamp == 1704067200000000000
+        assert sample.value == 42.5
+
+    def test_from_loki_value(self) -> None:
+        # Loki returns [unix_seconds_float, "string_value"]
+        value = [1704067200, "42.5"]
+        sample = MetricSample.from_loki_value(value)
+        # Should convert seconds to nanoseconds
+        assert sample.timestamp == 1704067200000000000
+        # Should parse string value to float
+        assert sample.value == 42.5
+
+    def test_from_loki_value_float_timestamp(self) -> None:
+        # Loki sometimes returns fractional seconds
+        value = [1704067200.5, "100"]
+        sample = MetricSample.from_loki_value(value)
+        assert sample.timestamp == 1704067200500000000
+        assert sample.value == 100.0
+
+    def test_roundtrip(self) -> None:
+        original = MetricSample(timestamp=1704067200000000000, value=99.9)
+        restored = MetricSample.from_dict(original.to_dict())
+        assert restored.timestamp == original.timestamp
+        assert restored.value == original.value
+
+
+class TestMetricSeries:
+    """Test MetricSeries model."""
+
+    def test_create_series(self) -> None:
+        samples = [
+            MetricSample(timestamp=1704067200000000000, value=10.0),
+            MetricSample(timestamp=1704067260000000000, value=20.0),
+        ]
+        series = MetricSeries(labels={"application": "api"}, samples=samples)
+        assert series.labels == {"application": "api"}
+        assert len(series.samples) == 2
+
+    def test_to_dict(self) -> None:
+        samples = [MetricSample(timestamp=1704067200000000000, value=10.0)]
+        series = MetricSeries(labels={"application": "api"}, samples=samples)
+        result = series.to_dict()
+        assert result["labels"] == {"application": "api"}
+        assert len(result["samples"]) == 1
+        assert result["samples"][0]["value"] == 10.0
+
+    def test_from_dict(self) -> None:
+        data = {
+            "labels": {"application": "api"},
+            "samples": [
+                {"timestamp": 1704067200000000000, "value": 10.0},
+                {"timestamp": 1704067260000000000, "value": 20.0},
+            ]
+        }
+        series = MetricSeries.from_dict(data)
+        assert series.labels == {"application": "api"}
+        assert len(series.samples) == 2
+        assert series.samples[1].value == 20.0
+
+    def test_from_loki_matrix(self) -> None:
+        loki_data = {
+            "metric": {"application": "hive-watcher", "severity": "info"},
+            "values": [
+                [1704067200, "150"],
+                [1704067260, "175"],
+                [1704067320, "200"],
+            ]
+        }
+        series = MetricSeries.from_loki_matrix(loki_data)
+        assert series.labels == {"application": "hive-watcher", "severity": "info"}
+        assert len(series.samples) == 3
+        assert series.samples[0].timestamp == 1704067200000000000
+        assert series.samples[0].value == 150.0
+        assert series.samples[2].value == 200.0
+
+    def test_from_loki_vector(self) -> None:
+        loki_data = {
+            "metric": {"application": "hive-watcher"},
+            "value": [1704067200, "42"]
+        }
+        series = MetricSeries.from_loki_vector(loki_data)
+        assert series.labels == {"application": "hive-watcher"}
+        assert len(series.samples) == 1
+        assert series.samples[0].timestamp == 1704067200000000000
+        assert series.samples[0].value == 42.0
+
+    def test_roundtrip(self) -> None:
+        original = MetricSeries(
+            labels={"job": "test"},
+            samples=[MetricSample(timestamp=123000000000, value=5.5)]
+        )
+        restored = MetricSeries.from_dict(original.to_dict())
+        assert restored.labels == original.labels
+        assert len(restored.samples) == len(original.samples)
+        assert restored.samples[0].value == original.samples[0].value
 
 
 class TestQueryStats:
@@ -268,3 +386,159 @@ class TestQueryResult:
     def test_total_entries_empty(self) -> None:
         result = QueryResult(status="success", streams=[], stats=None)
         assert result.total_entries == 0
+
+    def test_from_loki_response_matrix(self) -> None:
+        loki_response = {
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [
+                    {
+                        "metric": {"application": "hive-watcher", "severity": "info"},
+                        "values": [
+                            [1704067200, "150"],
+                            [1704067260, "175"],
+                        ]
+                    },
+                    {
+                        "metric": {"application": "hive-watcher", "severity": "error"},
+                        "values": [
+                            [1704067200, "5"],
+                            [1704067260, "3"],
+                        ]
+                    }
+                ],
+                "stats": {
+                    "summary": {
+                        "totalBytesProcessed": 2684354560,
+                        "totalLinesProcessed": 1000000,
+                        "execTime": 1.5
+                    }
+                }
+            }
+        }
+        result = QueryResult.from_loki_response(loki_response)
+        assert result.status == "success"
+        assert result.result_type == "matrix"
+        assert len(result.streams) == 0
+        assert len(result.metric_series) == 2
+        assert result.metric_series[0].labels["severity"] == "info"
+        assert len(result.metric_series[0].samples) == 2
+        assert result.metric_series[0].samples[0].value == 150.0
+        assert result.metric_series[1].samples[1].value == 3.0
+        assert result.stats.bytes_processed == 2684354560
+
+    def test_from_loki_response_vector(self) -> None:
+        loki_response = {
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {
+                        "metric": {"application": "hive-watcher"},
+                        "value": [1704067200, "12345"]
+                    },
+                    {
+                        "metric": {"application": "thumbor"},
+                        "value": [1704067200, "6789"]
+                    }
+                ],
+                "stats": {
+                    "summary": {
+                        "totalBytesProcessed": 1024,
+                        "totalLinesProcessed": 50,
+                        "execTime": 0.1
+                    }
+                }
+            }
+        }
+        result = QueryResult.from_loki_response(loki_response)
+        assert result.status == "success"
+        assert result.result_type == "vector"
+        assert len(result.streams) == 0
+        assert len(result.metric_series) == 2
+        assert result.metric_series[0].labels["application"] == "hive-watcher"
+        assert result.metric_series[0].samples[0].value == 12345.0
+        assert result.metric_series[1].labels["application"] == "thumbor"
+        assert result.metric_series[1].samples[0].value == 6789.0
+
+    def test_from_loki_response_streams_has_result_type(self) -> None:
+        loki_response = {
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [],
+                "stats": {
+                    "summary": {
+                        "totalBytesProcessed": 0,
+                        "totalLinesProcessed": 0,
+                        "execTime": 0.0
+                    }
+                }
+            }
+        }
+        result = QueryResult.from_loki_response(loki_response)
+        assert result.result_type == "streams"
+        assert len(result.metric_series) == 0
+
+    def test_total_samples(self) -> None:
+        series = [
+            MetricSeries(
+                labels={"app": "a"},
+                samples=[
+                    MetricSample(timestamp=1, value=10.0),
+                    MetricSample(timestamp=2, value=20.0),
+                ]
+            ),
+            MetricSeries(
+                labels={"app": "b"},
+                samples=[
+                    MetricSample(timestamp=3, value=30.0),
+                ]
+            )
+        ]
+        result = QueryResult(
+            status="success",
+            streams=[],
+            stats=None,
+            result_type="matrix",
+            metric_series=series,
+        )
+        assert result.total_samples == 3
+
+    def test_to_dict_with_metric_series(self) -> None:
+        series = [
+            MetricSeries(
+                labels={"app": "test"},
+                samples=[MetricSample(timestamp=123000000000, value=42.0)]
+            )
+        ]
+        result = QueryResult(
+            status="success",
+            streams=[],
+            stats=None,
+            result_type="matrix",
+            metric_series=series,
+        )
+        data = result.to_dict()
+        assert data["result_type"] == "matrix"
+        assert len(data["metric_series"]) == 1
+        assert data["metric_series"][0]["labels"] == {"app": "test"}
+
+    def test_from_dict_with_metric_series(self) -> None:
+        data = {
+            "status": "success",
+            "streams": [],
+            "stats": None,
+            "result_type": "matrix",
+            "metric_series": [
+                {
+                    "labels": {"app": "test"},
+                    "samples": [{"timestamp": 123000000000, "value": 42.0}]
+                }
+            ]
+        }
+        result = QueryResult.from_dict(data)
+        assert result.result_type == "matrix"
+        assert len(result.metric_series) == 1
+        assert result.metric_series[0].samples[0].value == 42.0

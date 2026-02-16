@@ -1,8 +1,8 @@
 [project]
 name = "loki-reader-core"
-version = "0.0.1"
+version = "0.1.0"
 authors = [
-  { name="Jason Byteforge", email="jmazzahacks@gmail.com" },
+  { name="Jason Byteforge", email="jason@mzmail.me" },
 ]
 description = "Python library for querying Grafana Loki logs via REST API"
 keywords = ["loki", "grafana", "logging", "logs", "observability"]

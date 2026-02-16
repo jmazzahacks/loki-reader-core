@@ -20,17 +20,17 @@ def now_ns() -> int:
     return int(time.time() * NANOSECONDS_PER_SECOND)
 
 
-def seconds_to_ns(seconds: int) -> int:
+def seconds_to_ns(seconds: int | float) -> int:
     """
     Convert Unix seconds to nanoseconds.
 
     Args:
-        seconds: Unix timestamp in seconds.
+        seconds: Unix timestamp in seconds (may be fractional).
 
     Returns:
         Timestamp in nanoseconds.
     """
-    return seconds * NANOSECONDS_PER_SECOND
+    return round(seconds * NANOSECONDS_PER_SECOND)
 
 
 def ns_to_seconds(nanoseconds: int) -> int:
