@@ -8,7 +8,102 @@ import requests
 
 from .exceptions import LokiAuthError, LokiConnectionError, LokiQueryError
 from .models import QueryResult
-from .utils import now_ns
+from .utils import now_ns, NANOSECONDS_PER_MINUTE, NANOSECONDS_PER_HOUR
+
+APP_LABEL_NAMES = ["application", "app", "job", "service", "service_name", "logger"]
+SEVERITY_LABEL_NAMES = ["level", "severity", "log_level", "loglevel"]
+SEVERITY_TIERS = ["trace", "debug", "info", "warn", "warning", "error", "fatal", "critical"]
+
+
+def _is_metric_query(logql: str) -> bool:
+    """Check if a LogQL query is a metric query (vs a log selector).
+
+    Metric queries start with aggregation functions and return numeric
+    results via the instant endpoint. Log selectors return log streams
+    and need the range endpoint.
+
+    Args:
+        logql: LogQL query string.
+
+    Returns:
+        True if the query is a metric/aggregation query.
+    """
+    metric_prefixes = [
+        "count_over_time", "rate", "bytes_over_time", "bytes_rate",
+        "sum", "avg", "min", "max", "stddev", "stdvar",
+        "quantile_over_time", "first_over_time", "last_over_time",
+        "absent_over_time", "rate_counter", "topk", "bottomk",
+        "sort", "sort_desc", "label_replace", "label_join",
+    ]
+    stripped = logql.strip().lower()
+    for prefix in metric_prefixes:
+        if stripped.startswith(prefix + "(") or stripped.startswith(prefix + " ("):
+            return True
+    return False
+
+
+def _build_severity_regex(min_severity: str) -> str:
+    """Build regex matching min_severity and all higher severity tiers.
+
+    Canonical order (low to high): trace, debug, info, warn, error, fatal.
+    Aliases: "warning" maps to "warn", "critical" maps to "fatal".
+
+    Args:
+        min_severity: Minimum severity level to include.
+
+    Returns:
+        Pipe-separated regex string (e.g. "error|fatal|critical").
+
+    Raises:
+        ValueError: If min_severity is not a recognized level.
+    """
+    normalized = min_severity.strip().lower()
+
+    if normalized == "warning":
+        normalized = "warn"
+    if normalized == "critical":
+        normalized = "fatal"
+
+    canonical = ["trace", "debug", "info", "warn", "error", "fatal"]
+    idx = canonical.index(normalized)  # raises ValueError if invalid
+    selected = canonical[idx:]
+
+    expanded = []
+    for level in selected:
+        expanded.append(level)
+        if level == "warn":
+            expanded.append("warning")
+        elif level == "fatal":
+            expanded.append("critical")
+
+    return "|".join(expanded)
+
+
+def _resolve_since(
+    since_minutes: Optional[int],
+    since_hours: Optional[int],
+    since_days: Optional[int],
+) -> Optional[tuple[int, int]]:
+    """Resolve relative time params into a (start_ns, end_ns) tuple.
+
+    Priority: since_minutes > since_hours > since_days.
+
+    Args:
+        since_minutes: Number of minutes to look back.
+        since_hours: Number of hours to look back.
+        since_days: Number of days to look back.
+
+    Returns:
+        Tuple of (start_ns, end_ns) or None if all params are None.
+    """
+    end = now_ns()
+    if since_minutes is not None:
+        return (end - since_minutes * NANOSECONDS_PER_MINUTE, end)
+    if since_hours is not None:
+        return (end - since_hours * NANOSECONDS_PER_HOUR, end)
+    if since_days is not None:
+        return (end - since_days * NANOSECONDS_PER_HOUR * 24, end)
+    return None
 
 
 class LokiClient:
@@ -22,12 +117,7 @@ class LokiClient:
             org_id="tenant-1"
         )
 
-        result = client.query_range(
-            logql='{job="api"} |= "error"',
-            start=hours_ago_ns(1),
-            end=now_ns(),
-            limit=500
-        )
+        result = client.query(app="my-api", severity="error", since_hours=1)
     """
 
     def __init__(
@@ -58,6 +148,8 @@ class LokiClient:
         self.timeout = timeout
 
         self._session: Optional[requests.Session] = None
+        self._app_label_cache: dict[str, str] = {}
+        self._severity_label_cache: Optional[str] = None
 
     @property
     def session(self) -> requests.Session:
@@ -139,33 +231,126 @@ class LokiClient:
 
         return data
 
-    def query(
-        self,
-        logql: str,
-        time: Optional[int] = None,
-        limit: int = 100
-    ) -> QueryResult:
-        """
-        Execute an instant query at a single point in time.
+    def _find_app_label(self, app_value: str) -> str:
+        """Discover which label name contains the given app value.
+
+        Checks a prioritized list of common label names and returns the
+        first one that contains the app value. Results are cached.
 
         Args:
-            logql: LogQL query string (e.g., '{job="api"} |= "error"').
-            time: Optional timestamp in nanoseconds. Defaults to now.
-            limit: Maximum number of entries to return.
+            app_value: Application name to search for.
 
         Returns:
-            QueryResult containing matching log streams.
+            The label name that contains the app value.
+
+        Raises:
+            ValueError: If app_value is not found in any common label.
         """
-        params = {
-            "query": logql,
-            "limit": limit
-        }
+        if app_value in self._app_label_cache:
+            return self._app_label_cache[app_value]
 
-        if time is not None:
-            params["time"] = str(time)
+        for label_name in APP_LABEL_NAMES:
+            values = self.get_label_values(label_name)
+            if app_value in values:
+                self._app_label_cache[app_value] = label_name
+                return label_name
 
-        response = self._request("GET", "/loki/api/v1/query", params)
-        return QueryResult.from_loki_response(response)
+        raise ValueError(
+            f"Could not find '{app_value}' in any common label "
+            f"({', '.join(APP_LABEL_NAMES)}). Use logql param for custom labels."
+        )
+
+    def _find_severity_label(self) -> Optional[str]:
+        """Discover which label name is used for severity/level.
+
+        Checks a prioritized list of common severity label names and
+        returns the first one that has values. Result is cached.
+
+        Returns:
+            The severity label name, or None if not found.
+        """
+        if self._severity_label_cache is not None:
+            return self._severity_label_cache
+
+        for label_name in SEVERITY_LABEL_NAMES:
+            values = self.get_label_values(label_name)
+            if values:
+                self._severity_label_cache = label_name
+                return label_name
+
+        return None
+
+    def query(
+        self,
+        logql: Optional[str] = None,
+        app: Optional[str] = None,
+        severity: Optional[str] = None,
+        limit: int = 100,
+        since_minutes: Optional[int] = None,
+        since_hours: Optional[int] = None,
+        since_days: Optional[int] = None,
+    ) -> QueryResult:
+        """
+        Query Loki logs by application name or LogQL expression.
+
+        For app-based queries, auto-discovers the correct label name and
+        builds the LogQL selector. For raw LogQL, passes through directly.
+
+        Metric queries (count_over_time, rate, etc.) use the instant endpoint.
+        All other queries use the range endpoint with a time window.
+
+        Args:
+            logql: Raw LogQL query string. Mutually exclusive with app.
+            app: Application name to search for. Auto-discovers the label.
+            severity: Minimum severity level (trace/debug/info/warn/error/fatal).
+            limit: Maximum number of entries to return.
+            since_minutes: Look back N minutes from now.
+            since_hours: Look back N hours from now.
+            since_days: Look back N days from now.
+
+        Returns:
+            QueryResult containing matching log streams or metric results.
+
+        Raises:
+            ValueError: If both logql and app are provided, or neither.
+        """
+        if logql is not None and app is not None:
+            raise ValueError("Cannot combine 'logql' with 'app'")
+        if logql is None and app is None:
+            raise ValueError("Must provide either 'logql' or 'app'")
+
+        if app is not None:
+            label_name = self._find_app_label(app)
+            selector = f'{label_name}="{app}"'
+            if severity is not None:
+                sev_label = self._find_severity_label()
+                if sev_label:
+                    regex = _build_severity_regex(severity)
+                    selector += f', {sev_label}=~"{regex}"'
+            logql = "{" + selector + "}"
+
+        has_since = any(
+            p is not None for p in [since_minutes, since_hours, since_days]
+        )
+
+        if _is_metric_query(logql) and not has_since:
+            params = {"query": logql, "limit": limit}
+            response = self._request("GET", "/loki/api/v1/query", params)
+            return QueryResult.from_loki_response(response)
+
+        time_range = _resolve_since(since_minutes, since_hours, since_days)
+        if time_range is None:
+            end = now_ns()
+            start = end - (30 * 24 * NANOSECONDS_PER_HOUR)
+            time_range = (start, end)
+
+        return self.query_range(
+            logql=logql,
+            start=time_range[0],
+            end=time_range[1],
+            limit=limit,
+            direction="backward",
+        )
 
     def query_range(
         self,

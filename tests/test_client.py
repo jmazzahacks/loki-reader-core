@@ -1,11 +1,22 @@
 """Tests for LokiClient."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
 from loki_reader_core import LokiClient
+from loki_reader_core.client import _is_metric_query, _build_severity_regex, _resolve_since
 from loki_reader_core.exceptions import LokiAuthError, LokiConnectionError, LokiQueryError
+
+
+MOCK_LOKI_RESPONSE = {
+    "status": "success",
+    "data": {
+        "resultType": "streams",
+        "result": [],
+        "stats": {"summary": {}}
+    }
+}
 
 
 class TestLokiClientInit:
@@ -58,6 +69,11 @@ class TestLokiClientInit:
             timeout=60
         )
         assert client.timeout == 60
+
+    def test_init_label_caches_empty(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        assert client._app_label_cache == {}
+        assert client._severity_label_cache is None
 
 
 class TestLokiClientSession:
@@ -243,49 +259,6 @@ class TestLokiClientQuery:
     """Test LokiClient query methods."""
 
     @patch("loki_reader_core.client.requests.Session")
-    def test_query_basic(self, mock_session_class: MagicMock) -> None:
-        mock_session = MagicMock()
-        mock_session_class.return_value = mock_session
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "status": "success",
-            "data": {
-                "resultType": "streams",
-                "result": [],
-                "stats": {"summary": {}}
-            }
-        }
-        mock_session.request.return_value = mock_response
-
-        client = LokiClient(base_url="http://localhost:3100")
-        result = client.query(logql='{job="test"}')
-
-        assert result.status == "success"
-        mock_session.request.assert_called_once()
-        call_args = mock_session.request.call_args
-        assert call_args.kwargs["params"]["query"] == '{job="test"}'
-        assert call_args.kwargs["params"]["limit"] == 100
-
-    @patch("loki_reader_core.client.requests.Session")
-    def test_query_with_time(self, mock_session_class: MagicMock) -> None:
-        mock_session = MagicMock()
-        mock_session_class.return_value = mock_session
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "status": "success",
-            "data": {"resultType": "streams", "result": []}
-        }
-        mock_session.request.return_value = mock_response
-
-        client = LokiClient(base_url="http://localhost:3100")
-        client.query(logql='{job="test"}', time=1704067200000000000)
-
-        call_args = mock_session.request.call_args
-        assert call_args.kwargs["params"]["time"] == "1704067200000000000"
-
-    @patch("loki_reader_core.client.requests.Session")
     def test_query_range_basic(self, mock_session_class: MagicMock) -> None:
         mock_session = MagicMock()
         mock_session_class.return_value = mock_session
@@ -383,3 +356,246 @@ class TestLokiClientUtilityMethods:
 
         assert len(series) == 2
         assert series[0]["container"] == "web"
+
+
+class TestIsMetricQuery:
+    """Test _is_metric_query helper function."""
+
+    def test_count_over_time(self) -> None:
+        assert _is_metric_query('count_over_time({job="api"}[5m])') is True
+
+    def test_rate(self) -> None:
+        assert _is_metric_query('rate({job="api"}[5m])') is True
+
+    def test_sum_by(self) -> None:
+        assert _is_metric_query('sum(rate({job="api"}[5m])) by (level)') is True
+
+    def test_log_selector(self) -> None:
+        assert _is_metric_query('{job="api"}') is False
+
+    def test_log_selector_with_filter(self) -> None:
+        assert _is_metric_query('{job="api"} |= "error"') is False
+
+
+class TestBuildSeverityRegex:
+    """Test _build_severity_regex helper function."""
+
+    def test_severity_info(self) -> None:
+        assert _build_severity_regex("info") == "info|warn|warning|error|fatal|critical"
+
+    def test_severity_error(self) -> None:
+        assert _build_severity_regex("error") == "error|fatal|critical"
+
+    def test_severity_fatal(self) -> None:
+        assert _build_severity_regex("fatal") == "fatal|critical"
+
+    def test_severity_debug(self) -> None:
+        assert _build_severity_regex("debug") == "debug|info|warn|warning|error|fatal|critical"
+
+    def test_severity_trace(self) -> None:
+        assert _build_severity_regex("trace") == "trace|debug|info|warn|warning|error|fatal|critical"
+
+    def test_severity_warn_alias(self) -> None:
+        assert _build_severity_regex("warn") == "warn|warning|error|fatal|critical"
+
+    def test_severity_warning_alias(self) -> None:
+        assert _build_severity_regex("warning") == "warn|warning|error|fatal|critical"
+
+    def test_severity_critical_alias(self) -> None:
+        assert _build_severity_regex("critical") == "fatal|critical"
+
+    def test_severity_invalid(self) -> None:
+        with pytest.raises(ValueError):
+            _build_severity_regex("unknown")
+
+
+class TestResolveSince:
+    """Test _resolve_since helper function."""
+
+    def test_since_minutes(self) -> None:
+        result = _resolve_since(10, None, None)
+        assert result is not None
+        start, end = result
+        assert end > start
+        # 10 minutes in nanoseconds
+        assert (end - start) == 10 * 60 * 1_000_000_000
+
+    def test_since_hours(self) -> None:
+        result = _resolve_since(None, 2, None)
+        assert result is not None
+        start, end = result
+        assert (end - start) == 2 * 60 * 60 * 1_000_000_000
+
+    def test_since_days(self) -> None:
+        result = _resolve_since(None, None, 3)
+        assert result is not None
+        start, end = result
+        assert (end - start) == 3 * 24 * 60 * 60 * 1_000_000_000
+
+    def test_none_returns_none(self) -> None:
+        assert _resolve_since(None, None, None) is None
+
+    def test_minutes_takes_priority(self) -> None:
+        result = _resolve_since(10, 2, 3)
+        assert result is not None
+        start, end = result
+        assert (end - start) == 10 * 60 * 1_000_000_000
+
+
+class TestLabelDiscovery:
+    """Test label discovery methods."""
+
+    def test_find_app_label_application(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = ["myapp", "otherapp"]
+            result = client._find_app_label("myapp")
+            assert result == "application"
+            mock_glv.assert_called_once_with("application")
+
+    def test_find_app_label_job(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            def side_effect(label: str) -> list[str]:
+                if label == "job":
+                    return ["myapp", "worker"]
+                return []
+            mock_glv.side_effect = side_effect
+
+            result = client._find_app_label("myapp")
+            assert result == "job"
+
+    def test_find_app_label_not_found(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = []
+            with pytest.raises(ValueError, match="Could not find 'myapp'"):
+                client._find_app_label("myapp")
+
+    def test_find_severity_label(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = ["info", "error", "warn"]
+            result = client._find_severity_label()
+            assert result == "level"
+            mock_glv.assert_called_once_with("level")
+
+    def test_find_severity_label_none(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = []
+            result = client._find_severity_label()
+            assert result is None
+
+    def test_label_discovery_cached(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = ["myapp"]
+
+            client._find_app_label("myapp")
+            client._find_app_label("myapp")
+
+            # Only called once - second call uses cache
+            mock_glv.assert_called_once_with("application")
+
+    def test_severity_label_cached(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_label_values") as mock_glv:
+            mock_glv.return_value = ["info", "error"]
+
+            client._find_severity_label()
+            client._find_severity_label()
+
+            mock_glv.assert_called_once_with("level")
+
+
+class TestLokiClientQueryRedesign:
+    """Test redesigned query() method."""
+
+    def test_query_app_only(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_find_app_label", return_value="application"), \
+             patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = MagicMock()
+
+            client.query(app="myapp")
+
+            mock_qr.assert_called_once()
+            args = mock_qr.call_args
+            assert args.kwargs["logql"] == '{application="myapp"}'
+            assert args.kwargs["limit"] == 100
+            assert args.kwargs["direction"] == "backward"
+
+    def test_query_app_with_severity(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_find_app_label", return_value="application"), \
+             patch.object(client, "_find_severity_label", return_value="level"), \
+             patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = MagicMock()
+
+            client.query(app="myapp", severity="error")
+
+            args = mock_qr.call_args
+            assert args.kwargs["logql"] == '{application="myapp", level=~"error|fatal|critical"}'
+
+    def test_query_app_since_minutes(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_find_app_label", return_value="application"), \
+             patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = MagicMock()
+
+            client.query(app="myapp", since_minutes=10)
+
+            args = mock_qr.call_args
+            start = args.kwargs["start"]
+            end = args.kwargs["end"]
+            diff_minutes = (end - start) / (60 * 1_000_000_000)
+            assert diff_minutes == 10
+
+    def test_query_logql_passthrough(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = MagicMock()
+
+            client.query(logql='{custom="query"}')
+
+            args = mock_qr.call_args
+            assert args.kwargs["logql"] == '{custom="query"}'
+
+    def test_query_logql_with_app_raises(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with pytest.raises(ValueError, match="Cannot combine"):
+            client.query(logql='{job="test"}', app="myapp")
+
+    def test_query_metric_instant(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_request") as mock_req:
+            mock_req.return_value = {
+                "status": "success",
+                "data": {"resultType": "vector", "result": []}
+            }
+
+            client.query(logql='count_over_time({job="api"}[5m])')
+
+            mock_req.assert_called_once()
+            args = mock_req.call_args
+            assert args.args[1] == "/loki/api/v1/query"
+
+    def test_query_neither_raises(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with pytest.raises(ValueError, match="Must provide"):
+            client.query()
+
+    def test_query_default_30_day_lookback(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_find_app_label", return_value="job"), \
+             patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = MagicMock()
+
+            client.query(app="myapp")
+
+            args = mock_qr.call_args
+            start = args.kwargs["start"]
+            end = args.kwargs["end"]
+            diff_days = (end - start) / (24 * 60 * 60 * 1_000_000_000)
+            assert diff_days == 30

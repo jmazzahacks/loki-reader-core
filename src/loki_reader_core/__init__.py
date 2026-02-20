@@ -6,7 +6,7 @@ from .client import LokiClient
 from .exceptions import LokiAuthError, LokiConnectionError, LokiError, LokiQueryError
 from .models import LogEntry, LogStream, MetricSample, MetricSeries, QueryResult, QueryStats
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "LokiClient",
