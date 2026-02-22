@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from loki_reader_core import LokiClient
-from loki_reader_core.client import _is_metric_query, _build_severity_regex, _resolve_since
+from loki_reader_core import LokiClient, LogEntry, LogStream, QueryResult
+from loki_reader_core.client import (
+    _is_metric_query, _build_severity_regex, _resolve_since, _merge_streams,
+)
 from loki_reader_core.exceptions import LokiAuthError, LokiConnectionError, LokiQueryError
 
 
@@ -509,16 +511,101 @@ class TestLabelDiscovery:
             mock_glv.assert_called_once_with("level")
 
 
+class TestMergeStreams:
+    """Test _merge_streams helper function."""
+
+    def test_single_stream_unchanged(self) -> None:
+        stream = LogStream(
+            labels={"application": "myapp", "logger": "root"},
+            entries=[LogEntry(timestamp=100, message="hello")],
+        )
+        result = QueryResult(status="success", streams=[stream], stats=None)
+
+        merged = _merge_streams(result, "application", "myapp")
+
+        assert len(merged.streams) == 1
+        assert merged.streams[0] is stream  # same object, not rebuilt
+
+    def test_empty_streams_unchanged(self) -> None:
+        result = QueryResult(status="success", streams=[], stats=None)
+        merged = _merge_streams(result, "application", "myapp")
+        assert len(merged.streams) == 0
+
+    def test_multiple_streams_merged(self) -> None:
+        stream1 = LogStream(
+            labels={"application": "myapp", "logger": "root", "severity": "info"},
+            entries=[
+                LogEntry(timestamp=300, message="root msg 1"),
+                LogEntry(timestamp=100, message="root msg 2"),
+            ],
+        )
+        stream2 = LogStream(
+            labels={"application": "myapp", "logger": "__main__", "severity": "info"},
+            entries=[
+                LogEntry(timestamp=200, message="main msg 1"),
+            ],
+        )
+        result = QueryResult(
+            status="success", streams=[stream1, stream2], stats=None,
+        )
+
+        merged = _merge_streams(result, "application", "myapp")
+
+        assert len(merged.streams) == 1
+        assert merged.streams[0].labels == {"application": "myapp"}
+        assert len(merged.streams[0].entries) == 3
+        # Sorted descending by timestamp
+        timestamps = [e.timestamp for e in merged.streams[0].entries]
+        assert timestamps == [300, 200, 100]
+
+    def test_merged_preserves_stats(self) -> None:
+        from loki_reader_core import QueryStats
+        stats = QueryStats(
+            exec_time_seconds=0.05, bytes_processed=1024,
+            lines_processed=10,
+        )
+        stream1 = LogStream(
+            labels={"app": "x", "logger": "a"},
+            entries=[LogEntry(timestamp=2, message="a")],
+        )
+        stream2 = LogStream(
+            labels={"app": "x", "logger": "b"},
+            entries=[LogEntry(timestamp=1, message="b")],
+        )
+        result = QueryResult(
+            status="success", streams=[stream1, stream2], stats=stats,
+        )
+
+        merged = _merge_streams(result, "app", "x")
+
+        assert merged.stats is stats
+        assert merged.status == "success"
+
+
 class TestLokiClientQueryRedesign:
     """Test redesigned query() method."""
+
+    def _make_multi_stream_result(self) -> QueryResult:
+        """Helper to create a QueryResult with multiple streams."""
+        stream1 = LogStream(
+            labels={"application": "myapp", "logger": "root", "severity": "info"},
+            entries=[LogEntry(timestamp=300, message="root log")],
+        )
+        stream2 = LogStream(
+            labels={"application": "myapp", "logger": "__main__", "severity": "info"},
+            entries=[LogEntry(timestamp=200, message="main log")],
+        )
+        return QueryResult(
+            status="success", streams=[stream1, stream2], stats=None,
+        )
 
     def test_query_app_only(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "_find_app_label", return_value="application"), \
              patch.object(client, "query_range") as mock_qr:
-            mock_qr.return_value = MagicMock()
+            mock_qr.return_value = self._make_multi_stream_result()
 
-            client.query(app="myapp")
+            result = client.query(app="myapp")
 
             mock_qr.assert_called_once()
             args = mock_qr.call_args
@@ -526,12 +613,35 @@ class TestLokiClientQueryRedesign:
             assert args.kwargs["limit"] == 100
             assert args.kwargs["direction"] == "backward"
 
+    def test_query_app_merges_streams(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "_find_app_label", return_value="application"), \
+             patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = self._make_multi_stream_result()
+
+            result = client.query(app="myapp")
+
+            assert len(result.streams) == 1
+            assert result.streams[0].labels == {"application": "myapp"}
+            assert len(result.streams[0].entries) == 2
+            timestamps = [e.timestamp for e in result.streams[0].entries]
+            assert timestamps == [300, 200]
+
+    def test_query_logql_does_not_merge(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "query_range") as mock_qr:
+            mock_qr.return_value = self._make_multi_stream_result()
+
+            result = client.query(logql='{application="myapp"}')
+
+            assert len(result.streams) == 2
+
     def test_query_app_with_severity(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "_find_app_label", return_value="application"), \
              patch.object(client, "_find_severity_label", return_value="level"), \
              patch.object(client, "query_range") as mock_qr:
-            mock_qr.return_value = MagicMock()
+            mock_qr.return_value = self._make_multi_stream_result()
 
             client.query(app="myapp", severity="error")
 
@@ -542,7 +652,7 @@ class TestLokiClientQueryRedesign:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "_find_app_label", return_value="application"), \
              patch.object(client, "query_range") as mock_qr:
-            mock_qr.return_value = MagicMock()
+            mock_qr.return_value = self._make_multi_stream_result()
 
             client.query(app="myapp", since_minutes=10)
 
@@ -590,7 +700,7 @@ class TestLokiClientQueryRedesign:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "_find_app_label", return_value="job"), \
              patch.object(client, "query_range") as mock_qr:
-            mock_qr.return_value = MagicMock()
+            mock_qr.return_value = self._make_multi_stream_result()
 
             client.query(app="myapp")
 

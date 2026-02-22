@@ -7,7 +7,7 @@ from typing import Optional
 import requests
 
 from .exceptions import LokiAuthError, LokiConnectionError, LokiQueryError
-from .models import QueryResult
+from .models import LogStream, QueryResult
 from .utils import now_ns, NANOSECONDS_PER_MINUTE, NANOSECONDS_PER_HOUR
 
 APP_LABEL_NAMES = ["application", "app", "job", "service", "service_name", "logger"]
@@ -104,6 +104,44 @@ def _resolve_since(
     if since_days is not None:
         return (end - since_days * NANOSECONDS_PER_HOUR * 24, end)
     return None
+
+
+def _merge_streams(result: QueryResult, app_label: str, app_value: str) -> QueryResult:
+    """Merge multiple log streams into a single stream sorted by timestamp.
+
+    Used for app-based queries where Loki returns separate streams per
+    logger/severity combination. Combines all entries into one flat
+    chronological list.
+
+    Args:
+        result: QueryResult with potentially multiple streams.
+        app_label: The label name used for the application (e.g. "application").
+        app_value: The application name (e.g. "materia-server").
+
+    Returns:
+        QueryResult with a single merged stream.
+    """
+    if len(result.streams) <= 1:
+        return result
+
+    all_entries = []
+    for stream in result.streams:
+        all_entries.extend(stream.entries)
+
+    all_entries.sort(key=lambda e: e.timestamp, reverse=True)
+
+    merged_stream = LogStream(
+        labels={app_label: app_value},
+        entries=all_entries,
+    )
+
+    return QueryResult(
+        status=result.status,
+        streams=[merged_stream],
+        stats=result.stats,
+        result_type=result.result_type,
+        metric_series=result.metric_series,
+    )
 
 
 class LokiClient:
@@ -319,9 +357,10 @@ class LokiClient:
         if logql is None and app is None:
             raise ValueError("Must provide either 'logql' or 'app'")
 
+        app_label = None
         if app is not None:
-            label_name = self._find_app_label(app)
-            selector = f'{label_name}="{app}"'
+            app_label = self._find_app_label(app)
+            selector = f'{app_label}="{app}"'
             if severity is not None:
                 sev_label = self._find_severity_label()
                 if sev_label:
@@ -344,13 +383,18 @@ class LokiClient:
             start = end - (30 * 24 * NANOSECONDS_PER_HOUR)
             time_range = (start, end)
 
-        return self.query_range(
+        result = self.query_range(
             logql=logql,
             start=time_range[0],
             end=time_range[1],
             limit=limit,
             direction="backward",
         )
+
+        if app_label is not None:
+            result = _merge_streams(result, app_label, app)
+
+        return result
 
     def query_range(
         self,
