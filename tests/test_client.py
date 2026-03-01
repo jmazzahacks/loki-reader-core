@@ -453,16 +453,12 @@ class TestLabelDiscovery:
             mock_glv.return_value = ["myapp", "otherapp"]
             result = client._find_app_label("myapp")
             assert result == "application"
-            mock_glv.assert_called_once()
-            args = mock_glv.call_args
-            assert args.args[0] == "application"
-            assert "start" in args.kwargs
-            assert "end" in args.kwargs
+            mock_glv.assert_called_once_with("application")
 
     def test_find_app_label_job(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "get_label_values") as mock_glv:
-            def side_effect(label: str, start: int = None, end: int = None) -> list[str]:
+            def side_effect(label: str) -> list[str]:
                 if label == "job":
                     return ["myapp", "worker"]
                 return []
@@ -484,11 +480,7 @@ class TestLabelDiscovery:
             mock_glv.return_value = ["info", "error", "warn"]
             result = client._find_severity_label()
             assert result == "level"
-            mock_glv.assert_called_once()
-            args = mock_glv.call_args
-            assert args.args[0] == "level"
-            assert "start" in args.kwargs
-            assert "end" in args.kwargs
+            mock_glv.assert_called_once_with("level")
 
     def test_find_severity_label_none(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
@@ -506,7 +498,7 @@ class TestLabelDiscovery:
             client._find_app_label("myapp")
 
             # Only called once - second call uses cache
-            mock_glv.assert_called_once()
+            mock_glv.assert_called_once_with("application")
 
     def test_severity_label_cached(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
@@ -516,19 +508,7 @@ class TestLabelDiscovery:
             client._find_severity_label()
             client._find_severity_label()
 
-            mock_glv.assert_called_once()
-
-    def test_discovery_uses_30_day_range(self) -> None:
-        client = LokiClient(base_url="http://localhost:3100")
-        with patch.object(client, "get_label_values") as mock_glv:
-            mock_glv.return_value = ["myapp"]
-            client._find_app_label("myapp")
-
-            args = mock_glv.call_args
-            start = args.kwargs["start"]
-            end = args.kwargs["end"]
-            diff_days = (end - start) / (24 * 60 * 60 * 1_000_000_000)
-            assert diff_days == 30
+            mock_glv.assert_called_once_with("level")
 
 
 class TestMergeStreams:

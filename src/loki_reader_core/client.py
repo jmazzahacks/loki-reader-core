@@ -301,9 +301,8 @@ class LokiClient:
         if app_value in self._app_label_cache:
             return self._app_label_cache[app_value]
 
-        start, end = self._discovery_time_range()
         for label_name in APP_LABEL_NAMES:
-            values = self.get_label_values(label_name, start=start, end=end)
+            values = self.get_label_values(label_name)
             if app_value in values:
                 self._app_label_cache[app_value] = label_name
                 return label_name
@@ -325,9 +324,8 @@ class LokiClient:
         if self._severity_label_cache is not None:
             return self._severity_label_cache
 
-        start, end = self._discovery_time_range()
         for label_name in SEVERITY_LABEL_NAMES:
-            values = self.get_label_values(label_name, start=start, end=end)
+            values = self.get_label_values(label_name)
             if values:
                 self._severity_label_cache = label_name
                 return label_name
@@ -452,6 +450,10 @@ class LokiClient:
         """
         Get list of available label names.
 
+        Defaults to a 30-day lookback when no time range is provided,
+        since Loki's label API may only return labels for recently
+        active streams without an explicit range.
+
         Args:
             start: Optional start timestamp in nanoseconds.
             end: Optional end timestamp in nanoseconds.
@@ -459,14 +461,15 @@ class LokiClient:
         Returns:
             List of label names.
         """
-        params = {}
+        if start is None and end is None:
+            start, end = self._discovery_time_range()
 
-        if start is not None:
-            params["start"] = str(start)
-        if end is not None:
-            params["end"] = str(end)
+        params = {
+            "start": str(start),
+            "end": str(end),
+        }
 
-        response = self._request("GET", "/loki/api/v1/labels", params or None)
+        response = self._request("GET", "/loki/api/v1/labels", params)
         return response.get("data", [])
 
     def get_label_values(
@@ -478,6 +481,10 @@ class LokiClient:
         """
         Get list of values for a specific label.
 
+        Defaults to a 30-day lookback when no time range is provided,
+        since Loki's label API may only return values for recently
+        active streams without an explicit range.
+
         Args:
             label: Label name to get values for.
             start: Optional start timestamp in nanoseconds.
@@ -486,12 +493,13 @@ class LokiClient:
         Returns:
             List of label values.
         """
-        params = {}
+        if start is None and end is None:
+            start, end = self._discovery_time_range()
 
-        if start is not None:
-            params["start"] = str(start)
-        if end is not None:
-            params["end"] = str(end)
+        params = {
+            "start": str(start),
+            "end": str(end),
+        }
 
         endpoint = f"/loki/api/v1/label/{label}/values"
         response = self._request("GET", endpoint, params or None)
