@@ -269,6 +269,20 @@ class LokiClient:
 
         return data
 
+    def _discovery_time_range(self) -> tuple[int, int]:
+        """Get a 30-day time range for label discovery queries.
+
+        Without a time range, Loki's label API only returns labels for
+        recently active streams. Using a 30-day window ensures we find
+        apps that haven't logged in a while.
+
+        Returns:
+            Tuple of (start_ns, end_ns) covering the last 30 days.
+        """
+        end = now_ns()
+        start = end - (30 * 24 * NANOSECONDS_PER_HOUR)
+        return (start, end)
+
     def _find_app_label(self, app_value: str) -> str:
         """Discover which label name contains the given app value.
 
@@ -287,8 +301,9 @@ class LokiClient:
         if app_value in self._app_label_cache:
             return self._app_label_cache[app_value]
 
+        start, end = self._discovery_time_range()
         for label_name in APP_LABEL_NAMES:
-            values = self.get_label_values(label_name)
+            values = self.get_label_values(label_name, start=start, end=end)
             if app_value in values:
                 self._app_label_cache[app_value] = label_name
                 return label_name
@@ -310,8 +325,9 @@ class LokiClient:
         if self._severity_label_cache is not None:
             return self._severity_label_cache
 
+        start, end = self._discovery_time_range()
         for label_name in SEVERITY_LABEL_NAMES:
-            values = self.get_label_values(label_name)
+            values = self.get_label_values(label_name, start=start, end=end)
             if values:
                 self._severity_label_cache = label_name
                 return label_name
