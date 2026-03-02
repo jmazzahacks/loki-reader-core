@@ -1,6 +1,6 @@
 [project]
 name = "loki-reader-core"
-version = "0.2.4"
+version = "0.2.5"
 authors = [
   { name="Jason Byteforge", email="jason@mzmail.me" },
 ]

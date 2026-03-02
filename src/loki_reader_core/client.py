@@ -522,6 +522,10 @@ class LokiClient:
         """
         Get list of unique label sets matching the given selectors.
 
+        Defaults to a 30-day lookback when no time range is provided,
+        since Loki's series API may only return series for recently
+        active streams without an explicit range.
+
         Args:
             match: List of stream selectors (e.g., ['{job="api"}', '{container="web"}']).
             start: Optional start timestamp in nanoseconds.
@@ -530,6 +534,9 @@ class LokiClient:
         Returns:
             List of label dictionaries representing unique streams.
         """
+        if start is None and end is None:
+            start, end = self._discovery_time_range()
+
         params = {"match[]": match}
 
         if start is not None:
