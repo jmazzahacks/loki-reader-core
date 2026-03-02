@@ -187,7 +187,7 @@ class LokiClient:
 
         self._session: Optional[requests.Session] = None
         self._app_label_cache: dict[str, str] = {}
-        self._severity_label_cache: Optional[str] = None
+        self._severity_label_cache: dict[str, Optional[str]] = {}
 
     @property
     def session(self) -> requests.Session:
@@ -312,24 +312,32 @@ class LokiClient:
             f"({', '.join(APP_LABEL_NAMES)}). Use logql param for custom labels."
         )
 
-    def _find_severity_label(self) -> Optional[str]:
-        """Discover which label name is used for severity/level.
+    def _find_severity_label(self, app_label: str, app_value: str) -> Optional[str]:
+        """Discover which severity label name is used by a specific app.
 
-        Checks a prioritized list of common severity label names and
-        returns the first one that has values. Result is cached.
+        Queries the actual stream labels for the given app and checks
+        which severity label name appears. This avoids false matches
+        from other apps using a different severity label.
+
+        Args:
+            app_label: The label name for the application (e.g. "application").
+            app_value: The application name (e.g. "materia-server").
 
         Returns:
-            The severity label name, or None if not found.
+            The severity label name for this app, or None if not found.
         """
-        if self._severity_label_cache is not None:
-            return self._severity_label_cache
+        if app_value in self._severity_label_cache:
+            return self._severity_label_cache[app_value]
+
+        series = self.get_series(match=['{' + f'{app_label}="{app_value}"' + '}'])
 
         for label_name in SEVERITY_LABEL_NAMES:
-            values = self.get_label_values(label_name)
-            if values:
-                self._severity_label_cache = label_name
-                return label_name
+            for s in series:
+                if label_name in s:
+                    self._severity_label_cache[app_value] = label_name
+                    return label_name
 
+        self._severity_label_cache[app_value] = None
         return None
 
     def query(
@@ -376,7 +384,7 @@ class LokiClient:
             app_label = self._find_app_label(app)
             selector = f'{app_label}="{app}"'
             if severity is not None:
-                sev_label = self._find_severity_label()
+                sev_label = self._find_severity_label(app_label, app)
                 if sev_label:
                     regex = _build_severity_regex(severity)
                     selector += f', {sev_label}=~"{regex}"'

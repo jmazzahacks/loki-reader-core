@@ -75,7 +75,7 @@ class TestLokiClientInit:
     def test_init_label_caches_empty(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
         assert client._app_label_cache == {}
-        assert client._severity_label_cache is None
+        assert client._severity_label_cache == {}
 
 
 class TestLokiClientSession:
@@ -474,19 +474,32 @@ class TestLabelDiscovery:
             with pytest.raises(ValueError, match="Could not find 'myapp'"):
                 client._find_app_label("myapp")
 
-    def test_find_severity_label(self) -> None:
+    def test_find_severity_label_from_series(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
-        with patch.object(client, "get_label_values") as mock_glv:
-            mock_glv.return_value = ["info", "error", "warn"]
-            result = client._find_severity_label()
+        with patch.object(client, "get_series") as mock_gs:
+            mock_gs.return_value = [
+                {"application": "myapp", "severity": "info", "logger": "root"},
+            ]
+            result = client._find_severity_label("application", "myapp")
+            assert result == "severity"
+            mock_gs.assert_called_once_with(match=['{application="myapp"}'])
+
+    def test_find_severity_label_level(self) -> None:
+        client = LokiClient(base_url="http://localhost:3100")
+        with patch.object(client, "get_series") as mock_gs:
+            mock_gs.return_value = [
+                {"application": "myapp", "level": "info", "logger": "root"},
+            ]
+            result = client._find_severity_label("application", "myapp")
             assert result == "level"
-            mock_glv.assert_called_once_with("level")
 
     def test_find_severity_label_none(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
-        with patch.object(client, "get_label_values") as mock_glv:
-            mock_glv.return_value = []
-            result = client._find_severity_label()
+        with patch.object(client, "get_series") as mock_gs:
+            mock_gs.return_value = [
+                {"application": "myapp", "logger": "root"},
+            ]
+            result = client._find_severity_label("application", "myapp")
             assert result is None
 
     def test_label_discovery_cached(self) -> None:
@@ -502,13 +515,16 @@ class TestLabelDiscovery:
 
     def test_severity_label_cached(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
-        with patch.object(client, "get_label_values") as mock_glv:
-            mock_glv.return_value = ["info", "error"]
+        with patch.object(client, "get_series") as mock_gs:
+            mock_gs.return_value = [
+                {"application": "myapp", "severity": "info"},
+            ]
 
-            client._find_severity_label()
-            client._find_severity_label()
+            client._find_severity_label("application", "myapp")
+            client._find_severity_label("application", "myapp")
 
-            mock_glv.assert_called_once_with("level")
+            # Only called once - second call uses cache
+            mock_gs.assert_called_once()
 
 
 class TestMergeStreams:
@@ -639,14 +655,14 @@ class TestLokiClientQueryRedesign:
     def test_query_app_with_severity(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
         with patch.object(client, "_find_app_label", return_value="application"), \
-             patch.object(client, "_find_severity_label", return_value="level"), \
+             patch.object(client, "_find_severity_label", return_value="severity"), \
              patch.object(client, "query_range") as mock_qr:
             mock_qr.return_value = self._make_multi_stream_result()
 
             client.query(app="myapp", severity="error")
 
             args = mock_qr.call_args
-            assert args.kwargs["logql"] == '{application="myapp", level=~"error|fatal|critical"}'
+            assert args.kwargs["logql"] == '{application="myapp", severity=~"error|fatal|critical"}'
 
     def test_query_app_since_minutes(self) -> None:
         client = LokiClient(base_url="http://localhost:3100")
