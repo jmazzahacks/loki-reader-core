@@ -12,7 +12,16 @@ from .utils import now_ns, NANOSECONDS_PER_MINUTE, NANOSECONDS_PER_HOUR
 
 APP_LABEL_NAMES = ["application", "app", "job", "service", "service_name", "logger"]
 SEVERITY_LABEL_NAMES = ["level", "severity", "log_level", "loglevel"]
-SEVERITY_TIERS = ["trace", "debug", "info", "warn", "warning", "error", "fatal", "critical"]
+SEVERITY_TIERS = [
+    "trace",
+    "debug",
+    "info",
+    "warn",
+    "warning",
+    "error",
+    "fatal",
+    "critical",
+]
 
 
 def _is_metric_query(logql: str) -> bool:
@@ -29,11 +38,27 @@ def _is_metric_query(logql: str) -> bool:
         True if the query is a metric/aggregation query.
     """
     metric_prefixes = [
-        "count_over_time", "rate", "bytes_over_time", "bytes_rate",
-        "sum", "avg", "min", "max", "stddev", "stdvar",
-        "quantile_over_time", "first_over_time", "last_over_time",
-        "absent_over_time", "rate_counter", "topk", "bottomk",
-        "sort", "sort_desc", "label_replace", "label_join",
+        "count_over_time",
+        "rate",
+        "bytes_over_time",
+        "bytes_rate",
+        "sum",
+        "avg",
+        "min",
+        "max",
+        "stddev",
+        "stdvar",
+        "quantile_over_time",
+        "first_over_time",
+        "last_over_time",
+        "absent_over_time",
+        "rate_counter",
+        "topk",
+        "bottomk",
+        "sort",
+        "sort_desc",
+        "label_replace",
+        "label_join",
     ]
     stripped = logql.strip().lower()
     for prefix in metric_prefixes:
@@ -165,7 +190,7 @@ class LokiClient:
         org_id: Optional[str] = None,
         ca_cert: Optional[str] = None,
         verify_ssl: bool = True,
-        timeout: int = 30
+        timeout: int = 30,
     ):
         """
         Initialize the Loki client.
@@ -213,7 +238,9 @@ class LokiClient:
 
         return self._session
 
-    def _request(self, method: str, endpoint: str, params: Optional[dict] = None) -> dict:
+    def _request(
+        self, method: str, endpoint: str, params: Optional[dict] = None
+    ) -> dict:
         """
         Make HTTP request to Loki API.
 
@@ -234,10 +261,7 @@ class LokiClient:
 
         try:
             response = self.session.request(
-                method=method,
-                url=url,
-                params=params,
-                timeout=self.timeout
+                method=method, url=url, params=params, timeout=self.timeout
             )
         except requests.exceptions.SSLError as e:
             raise LokiConnectionError(f"SSL error connecting to Loki: {e}") from e
@@ -329,7 +353,7 @@ class LokiClient:
         if app_value in self._severity_label_cache:
             return self._severity_label_cache[app_value]
 
-        series = self.get_series(match=['{' + f'{app_label}="{app_value}"' + '}'])
+        series = self.get_series(match=["{" + f'{app_label}="{app_value}"' + "}"])
 
         for label_name in SEVERITY_LABEL_NAMES:
             for s in series:
@@ -390,9 +414,7 @@ class LokiClient:
                     selector += f', {sev_label}=~"{regex}"'
             logql = "{" + selector + "}"
 
-        has_since = any(
-            p is not None for p in [since_minutes, since_hours, since_days]
-        )
+        has_since = any(p is not None for p in [since_minutes, since_hours, since_days])
 
         if _is_metric_query(logql) and not has_since:
             params = {"query": logql, "limit": limit}
@@ -424,7 +446,7 @@ class LokiClient:
         start: int,
         end: int,
         limit: int = 1000,
-        direction: str = "backward"
+        direction: str = "backward",
     ) -> QueryResult:
         """
         Execute a range query across a time period.
@@ -444,16 +466,14 @@ class LokiClient:
             "start": str(start),
             "end": str(end),
             "limit": limit,
-            "direction": direction
+            "direction": direction,
         }
 
         response = self._request("GET", "/loki/api/v1/query_range", params)
         return QueryResult.from_loki_response(response)
 
     def get_labels(
-        self,
-        start: Optional[int] = None,
-        end: Optional[int] = None
+        self, start: Optional[int] = None, end: Optional[int] = None
     ) -> list[str]:
         """
         Get list of available label names.
@@ -481,10 +501,7 @@ class LokiClient:
         return response.get("data", [])
 
     def get_label_values(
-        self,
-        label: str,
-        start: Optional[int] = None,
-        end: Optional[int] = None
+        self, label: str, start: Optional[int] = None, end: Optional[int] = None
     ) -> list[str]:
         """
         Get list of values for a specific label.
@@ -514,10 +531,7 @@ class LokiClient:
         return response.get("data", [])
 
     def get_series(
-        self,
-        match: list[str],
-        start: Optional[int] = None,
-        end: Optional[int] = None
+        self, match: list[str], start: Optional[int] = None, end: Optional[int] = None
     ) -> list[dict[str, str]]:
         """
         Get list of unique label sets matching the given selectors.
